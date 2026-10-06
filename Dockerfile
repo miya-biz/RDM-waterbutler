@@ -68,8 +68,6 @@ WORKDIR /code
 ARG GIT_COMMIT=
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-RUN sed -i -e 's/CipherString = DEFAULT@SECLEVEL=2/CipherString = DEFAULT@SECLEVEL=1/g' /etc/ssl/openssl.cnf
-
 EXPOSE 7777
 
 CMD ["gosu", "www-data", "python3", "-m", "invoke", "server"]
