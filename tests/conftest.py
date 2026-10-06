@@ -6,10 +6,12 @@ settings.config['TASKS_CONFIG'] = {
     'CELERY_RESULT_BACKEND': 'redis://'
 }
 
+import asyncio
 import inspect
 from unittest import mock
 
 import aiohttp
+import pytest
 import aiohttpretty
 
 
@@ -27,6 +29,23 @@ if 'stream_writer' in inspect.signature(aiohttp.ClientResponse.__init__).paramet
             super().__init__(*args, **kwargs)
 
     _aiohttpretty_globals['ClientResponse'] = _ClientResponseWithStreamWriter
+
+
+@pytest.fixture(autouse=True)
+def _default_event_loop():
+    # Synchronous fixtures build asyncio objects (e.g. ``streams.FileStreamReader``) before the
+    # test's own loop is installed, which needs a current event loop to exist.
+    policy = asyncio.get_event_loop_policy()
+    try:
+        policy.get_event_loop()
+    except RuntimeError:
+        loop = policy.new_event_loop()
+        policy.set_event_loop(loop)
+        yield
+        loop.close()
+        policy.set_event_loop(None)
+    else:
+        yield
 
 
 def pytest_configure(config):
