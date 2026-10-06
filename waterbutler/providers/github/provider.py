@@ -326,7 +326,7 @@ class GitHubProvider(provider.BaseProvider):
     async def intra_move(self, dest_provider, src_path, dest_path):
         return (await self._do_intra_move_or_copy(src_path, dest_path, False))
 
-    async def download(self, path: GitHubPath, range: Tuple[int, int]=None,  # type: ignore
+    async def download(self, path: GitHubPath, range: Tuple[int, int] = None,  # type: ignore
                        **kwargs) -> streams.ResponseStreamReader:
         """Get the stream to the specified file on github
         :param GitHubPath path: The path to the file on github

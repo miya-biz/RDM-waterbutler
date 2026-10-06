@@ -209,7 +209,7 @@ class OneDriveProvider(provider.BaseProvider):
     async def revalidate_path(self,  # type: ignore
                               base: OneDrivePath,
                               path: str,
-                              folder: bool=None) -> OneDrivePath:
+                              folder: bool = None) -> OneDrivePath:
         """Take a string file/folder name ``path`` and return a OneDrivePath object
         representing this file under ``base``.
         """
@@ -319,8 +319,8 @@ class OneDriveProvider(provider.BaseProvider):
 
     async def download(self,  # type: ignore
                        path: OneDrivePath,
-                       revision: str=None,
-                       range: typing.Tuple[int, int]=None,
+                       revision: str = None,
+                       range: typing.Tuple[int, int] = None,
                        **kwargs) -> streams.ResponseStreamReader:
         r"""Download the file identified by ``path``.  If ``revision`` is not ``None``, get
         the file at the version identified by ``revision``.
@@ -393,10 +393,10 @@ class OneDriveProvider(provider.BaseProvider):
     def can_duplicate_names(self) -> bool:
         return False
 
-    def can_intra_move(self, other: provider.BaseProvider, path: WaterButlerPath=None) -> bool:
+    def can_intra_move(self, other: provider.BaseProvider, path: WaterButlerPath = None) -> bool:
         return self == other
 
-    def can_intra_copy(self, other: provider.BaseProvider, path: WaterButlerPath=None) -> bool:
+    def can_intra_copy(self, other: provider.BaseProvider, path: WaterButlerPath = None) -> bool:
         return self == other
 
     async def intra_move(self,
@@ -506,7 +506,7 @@ class OneDriveProvider(provider.BaseProvider):
 
     async def create_folder(self,
                             path: OneDrivePath,
-                            folder_precheck: bool=True,
+                            folder_precheck: bool = True,
                             **kwargs) -> OneDriveFolderMetadata:
         """Create a folder identified by ``path``.
 
@@ -576,7 +576,7 @@ class OneDriveProvider(provider.BaseProvider):
 
     async def delete(self,
                      path: OneDrivePath,
-                     confirm_delete: int=0,
+                     confirm_delete: int = 0,
                      **kwargs) -> None:
         """Delete the file or directory identified by ``path``.
 

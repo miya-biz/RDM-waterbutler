@@ -925,7 +925,7 @@ class FigshareArticleProvider(BaseFigshareProvider):
         await resp.release()
         return FigsharePath('/' + file_id, _ids=('', ''), folder=False, is_public=False)
 
-    async def revalidate_path(self, parent_path, child_name, folder: bool=False):
+    async def revalidate_path(self, parent_path, child_name, folder: bool = False):
         r"""Attempt to get child's id and return FigsharePath of child.
 
         ``revalidate_path`` is used to check for the existance of a child_name/folder
