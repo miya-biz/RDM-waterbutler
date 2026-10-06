@@ -8,7 +8,6 @@ from unittest import mock
 
 import pytest
 from tornado import testing
-from tornado.platform.asyncio import AsyncIOMainLoop
 
 from waterbutler.server.app import make_app
 from waterbutler.core import metadata, provider
@@ -76,12 +75,6 @@ class MockStream(FileStreamReader):
 
     def __init__(self):
         super().__init__(tempfile.TemporaryFile())
-
-
-class MockRequestBody(asyncio.Future):
-
-    def __await__(self):
-        yield None
 
 
 class MockWriter(object):
@@ -160,11 +153,6 @@ class MockProvider2(MockProvider1):
 class HandlerTestCase(testing.AsyncHTTPTestCase):
 
     def setUp(self):
-        policy = asyncio.get_event_loop_policy()
-        policy.get_event_loop().close()
-        self.event_loop = policy.new_event_loop()
-        policy.set_event_loop(self.event_loop)
-
         super().setUp()
 
         def get_identity(*args, **kwargs):
@@ -198,13 +186,9 @@ class HandlerTestCase(testing.AsyncHTTPTestCase):
         if hasattr(self, 'HOOK_PATH'):
             self.send_hook_patcher.stop()
         self.make_provider_patcher.stop()
-        self.event_loop.close()
 
     def get_app(self):
         return make_app(debug=False)
-
-    def get_new_ioloop(self):
-        return AsyncIOMainLoop()
 
 
 class MultiProviderHandlerTestCase(HandlerTestCase):
