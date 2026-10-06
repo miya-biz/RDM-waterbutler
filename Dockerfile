@@ -57,6 +57,12 @@ COPY --from=build /usr/local/lib/python3.13/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin /usr/local/bin
 COPY --from=build /code /code
 
+# pip is not needed at runtime and ships its own copies of urllib3, msgpack and
+# setuptools, so remove it together with the wheel bundled for ensurepip
+RUN python3 -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip/_bundled \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13
+
 WORKDIR /code
 
 ARG GIT_COMMIT=
