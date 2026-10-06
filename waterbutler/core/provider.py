@@ -157,7 +157,7 @@ class BaseProvider(metaclass=abc.ABCMeta):
     def __eq__(self, other):
         try:
             return (
-                type(self) == type(other) and
+                type(self) is type(other) and
                 self.credentials == other.credentials
             )
         except AttributeError:

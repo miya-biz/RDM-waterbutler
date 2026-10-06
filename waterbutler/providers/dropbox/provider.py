@@ -649,7 +649,7 @@ class DropboxProvider(provider.BaseProvider):
 
     def can_intra_copy(self, dest_provider: provider.BaseProvider,
                        path: WaterButlerPath=None) -> bool:
-        return type(self) == type(dest_provider)
+        return type(self) is type(dest_provider)
 
     def can_intra_move(self, dest_provider: provider.BaseProvider,
                        path: WaterButlerPath=None) -> bool:

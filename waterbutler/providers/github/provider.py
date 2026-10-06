@@ -314,7 +314,7 @@ class GitHubProvider(provider.BaseProvider):
 
     def can_intra_copy(self, other, path=None):
         return (
-            type(self) == type(other) and
+            type(self) is type(other) and
             self.repo == other.repo and
             self.owner == other.owner
         )

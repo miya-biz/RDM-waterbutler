@@ -34,8 +34,8 @@ class WaterButlerPathPart:
     @property
     def value(self) -> str:
         if self._count:
-            return'{} ({}){}'.format(self._name, self._count, self._ext)
-        return'{}{}'.format(self._name, self._ext)
+            return '{} ({}){}'.format(self._name, self._count, self._ext)
+        return '{}{}'.format(self._name, self._ext)
 
     @property
     def raw(self) -> str:

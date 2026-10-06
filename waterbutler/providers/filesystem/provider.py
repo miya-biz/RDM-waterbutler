@@ -132,7 +132,7 @@ class FileSystemProvider(provider.BaseProvider):
         }
 
     def can_intra_copy(self, dest_provider, path=None):
-        return type(self) == type(dest_provider)
+        return type(self) is type(dest_provider)
 
     def can_intra_move(self, dest_provider, path=None):
         return self.can_intra_copy(dest_provider)
