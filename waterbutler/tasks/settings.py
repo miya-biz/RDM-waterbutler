@@ -43,6 +43,12 @@ result_serializer = 'pickle'
 accept_content = ['pickle', 'json']
 result_accept_content = ['pickle', 'json']
 
+# Remote control messages (including the hello/reply exchange workers do at startup)
+# are serialized with task_serializer, so they are pickle too. Keep them on an exchange
+# of our own: other Celery applications sharing this broker accept JSON only, and a
+# pickle reply from a WaterButler worker would make their workers fail at startup.
+control_exchange = config.get('CELERY_CONTROL_EXCHANGE', 'waterbutler')
+
 imports = [
     'waterbutler.tasks.move',
     'waterbutler.tasks.copy',
