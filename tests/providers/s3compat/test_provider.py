@@ -193,10 +193,43 @@ def generate_url_helper(provider):
             params['ServerSideEncryption'] = (headers or {}).get('x-amz-server-side-encryption', 'AES256')
         
         return provider.connection.generate_presigned_url(
-            client_method, Params=params, ExpiresIn=expires, HttpMethod=method_upper
+            client_method, Params=params, ExpiresIn=expires, HttpMethod=method_upper,
+            Headers=headers,
         )
-    
+
     return _generate_url
+
+
+def register_delete_objects(provider, generate_url_helper, objects, deleted=(), errors=()):
+    """Register the multi-object delete request the provider sends for ``objects``.
+
+    :param list objects: ``{'Key': ..., 'VersionId': ...}`` dicts in the order the provider sends them
+    :param deleted: entries for the ``<Deleted>`` elements of the response
+    :param errors: entries for the ``<Error>`` elements of the response
+    :return: the signed URL of the request
+    """
+    entries = []
+    for obj in objects:
+        entry = '<Key>{}</Key>'.format(xml.sax.saxutils.escape(obj['Key']))
+        if obj.get('VersionId'):
+            entry += '<VersionId>{}</VersionId>'.format(xml.sax.saxutils.escape(obj['VersionId']))
+        entries.append('<Object>{}</Object>'.format(entry))
+    payload = '<?xml version="1.0" encoding="UTF-8"?><Delete>{}</Delete>'.format(''.join(entries)).encode('utf-8')
+    headers = {
+        'Content-Length': str(len(payload)),
+        'Content-MD5': compute_md5(BytesIO(payload))[1],
+        'Content-Type': 'text/xml',
+    }
+    url = generate_url_helper(method='POST', expires=100, headers=headers, query_parameters={'delete': ''})
+    body = '<?xml version="1.0" encoding="UTF-8"?><DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+    for item in deleted:
+        body += '<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>'.format(item['Key'], item.get('VersionId', ''))
+    for item in errors:
+        body += '<Error><Key>{}</Key><VersionId>{}</VersionId><Code>{}</Code><Message>{}</Message></Error>'.format(
+            item['Key'], item.get('VersionId', ''), item['Code'], item.get('Message', ''))
+    body += '</DeleteResult>'
+    aiohttpretty.register_uri('POST', url, status=200, body=body)
+    return url
 
 
 @pytest.fixture
@@ -788,28 +821,22 @@ class TestProviderConstruction:
         provider = S3CompatProvider(auth, {'host': 'securehost',
                                            'access_key': 'a',
                                            'secret_key': 's'}, settings)
-        assert provider.connection.use_ssl
-        assert provider.connection.verify_ssl
         assert provider.connection.endpoint_url == 'https://securehost'
 
         provider = S3CompatProvider(auth, {'host': 'securehost:443',
                                            'access_key': 'a',
                                            'secret_key': 's'}, settings)
-        assert provider.connection.use_ssl
-        assert provider.connection.verify_ssl
         assert provider.connection.endpoint_url == 'https://securehost'
 
     def test_http(self, auth, credentials, settings):
         provider = S3CompatProvider(auth, {'host': 'normalhost:80',
                                            'access_key': 'a',
                                            'secret_key': 's'}, settings)
-        assert not provider.connection.use_ssl
         assert provider.connection.endpoint_url == 'http://normalhost'
 
         provider = S3CompatProvider(auth, {'host': 'normalhost:8080',
                                            'access_key': 'a',
                                            'secret_key': 's'}, settings)
-        assert not provider.connection.use_ssl
         assert provider.connection.endpoint_url == 'http://normalhost:8080'
 
 
@@ -1740,20 +1767,20 @@ class TestCRUD:
             </ListVersionsResult>'''
         aiohttpretty.register_uri('GET', versions_url, params=params, status=200, body=version_body)
 
-        # Mock the boto3 delete_objects call
         mock_delete_response = {
             'Deleted': [{'Key': 'some-file', 'VersionId': 'null'}],
             'Errors': []
         }
-        provider.bucket.delete_objects = mock.Mock(return_value=mock_delete_response)
+        delete_url = register_delete_objects(
+            provider, generate_url_helper,
+            objects=mock_delete_response['Deleted'] + mock_delete_response['Errors'],
+            deleted=mock_delete_response['Deleted'], errors=mock_delete_response['Errors'],
+        )
 
         await provider.delete(path)
 
         assert aiohttpretty.has_call(method='GET', uri=versions_url, params=params)
-        # Verify delete_objects was called with correct parameters
-        provider.bucket.delete_objects.assert_called_once()
-        call_args = provider.bucket.delete_objects.call_args
-        assert call_args[1]['Delete']['Objects'] == [{'Key': path.full_path, 'VersionId': 'null'}]
+        assert aiohttpretty.has_call(method='POST', uri=delete_url)
 
     @pytest.mark.asyncio
     @pytest.mark.aiohttpretty
@@ -1805,7 +1832,6 @@ class TestCRUD:
         aiohttpretty.register_uri('GET', prefix_check_url, params=prefix_check_params,
                                 body=prefix_check_body, status=200)
 
-        # Mock the boto3 delete_objects call
         mock_delete_response = {
             'Deleted': [
                 {'Key': 'my-image.jpg', 'VersionId': '3/L4kqtJl40Nr8X8gdRQBpUMLUo'},
@@ -1814,7 +1840,11 @@ class TestCRUD:
             ],
             'Errors': []
         }
-        provider.bucket.delete_objects = mock.Mock(return_value=mock_delete_response)
+        delete_url = register_delete_objects(
+            provider, generate_url_helper,
+            objects=mock_delete_response['Deleted'] + mock_delete_response['Errors'],
+            deleted=mock_delete_response['Deleted'], errors=mock_delete_response['Errors'],
+        )
 
         with pytest.raises(exceptions.DeleteError):
             await provider.delete(path)
@@ -1822,7 +1852,7 @@ class TestCRUD:
         await provider.delete(path, confirm_delete=1)
 
         # Verify delete_objects was called once (for the second call with confirm_delete=1)
-        assert provider.bucket.delete_objects.call_count == 1
+        assert aiohttpretty.has_call(method='POST', uri=delete_url)
 
     @pytest.mark.asyncio
     @pytest.mark.aiohttpretty
@@ -1852,7 +1882,6 @@ class TestCRUD:
 
         aiohttpretty.register_uri('GET', versions_url, params=params, body=list_versions_body, status=200)
 
-        # Mock the boto3 delete_objects call
         mock_delete_response = {
             'Deleted': [
                 {'Key': 'folder-to-delete/file1.txt', 'VersionId': '111'},
@@ -1861,7 +1890,11 @@ class TestCRUD:
             ],
             'Errors': []
         }
-        provider.bucket.delete_objects = mock.Mock(return_value=mock_delete_response)
+        delete_url = register_delete_objects(
+            provider, generate_url_helper,
+            objects=mock_delete_response['Deleted'] + mock_delete_response['Errors'],
+            deleted=mock_delete_response['Deleted'], errors=mock_delete_response['Errors'],
+        )
 
         # Mock _folder_prefix_exists check (list_objects)
         prefix_check_query = {
@@ -1883,7 +1916,7 @@ class TestCRUD:
         assert aiohttpretty.has_call(method='GET', uri=versions_url, params=params)
 
         # Verify delete_objects was called
-        provider.bucket.delete_objects.assert_called_once()
+        assert aiohttpretty.has_call(method='POST', uri=delete_url)
 
     @pytest.mark.asyncio
     @pytest.mark.aiohttpretty
@@ -1933,7 +1966,6 @@ class TestCRUD:
 
         aiohttpretty.register_uri('GET', versions_url2, params=params2, body=list_versions_body2, status=200)
 
-        # Mock the boto3 delete_objects call
         mock_delete_response = {
             'Deleted': [
                 {'Key': 'large-folder/file1.txt', 'VersionId': '111'},
@@ -1941,7 +1973,11 @@ class TestCRUD:
             ],
             'Errors': []
         }
-        provider.bucket.delete_objects = mock.Mock(return_value=mock_delete_response)
+        delete_url = register_delete_objects(
+            provider, generate_url_helper,
+            objects=mock_delete_response['Deleted'] + mock_delete_response['Errors'],
+            deleted=mock_delete_response['Deleted'], errors=mock_delete_response['Errors'],
+        )
 
         # Mock _folder_prefix_exists check (list_objects)
         prefix_check_query = {
@@ -1964,7 +2000,7 @@ class TestCRUD:
         assert aiohttpretty.has_call(method='GET', uri=versions_url2, params=params2)
 
         # Verify delete_objects was called once
-        provider.bucket.delete_objects.assert_called_once()
+        assert aiohttpretty.has_call(method='POST', uri=delete_url)
 
     @pytest.mark.asyncio
     @pytest.mark.aiohttpretty
@@ -2009,7 +2045,6 @@ class TestCRUD:
 
         aiohttpretty.register_uri('GET', versions_url, params=params, body=list_versions_body, status=200)
 
-        # Mock failed delete_objects response
         mock_delete_response = {
             'Deleted': [],
             'Errors': [
@@ -2021,14 +2056,18 @@ class TestCRUD:
                 }
             ]
         }
-        provider.bucket.delete_objects = mock.Mock(return_value=mock_delete_response)
+        delete_url = register_delete_objects(
+            provider, generate_url_helper,
+            objects=mock_delete_response['Deleted'] + mock_delete_response['Errors'],
+            deleted=mock_delete_response['Deleted'], errors=mock_delete_response['Errors'],
+        )
 
         with pytest.raises(exceptions.DeleteError):
             await provider._delete_folder(path)
 
         # Verify both requests were made
         assert aiohttpretty.has_call(method='GET', uri=versions_url, params=params)
-        provider.bucket.delete_objects.assert_called_once()
+        assert aiohttpretty.has_call(method='POST', uri=delete_url)
 
 
 class TestMetadata:

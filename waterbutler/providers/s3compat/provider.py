@@ -1,5 +1,4 @@
 import os
-import asyncio
 import hashlib
 import functools
 from http import HTTPStatus
@@ -12,8 +11,9 @@ from io import BytesIO
 import base64
 
 import xmltodict
-import boto3
-from botocore.config import Config
+from botocore.auth import HmacV1QueryAuth
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 
 from waterbutler.core import streams, provider, exceptions
 from waterbutler.core.path import WaterButlerPath
@@ -40,36 +40,111 @@ def compute_md5(fp):
 
 
 class S3CompatConnection:
-    def __init__(self, aws_access_key_id=None, aws_secret_access_key=None,
-                 endpoint_url=None, region_name=None, use_ssl=True,
-                 verify_ssl=True, addressing_style='path'):
-        self.endpoint_url = endpoint_url
-        self.region_name = region_name
-        self.use_ssl = use_ssl
-        self.verify_ssl = verify_ssl
+    """Builds signature-version-2 URLs for the S3 compatible storage.
 
-        # Signature version 2 with path-style addressing, as the storages this provider
-        # targets do not necessarily support signature version 4
-        config = Config(
-            signature_version='s3',
-            s3={
-                'addressing_style': addressing_style  # 'path', 'virtual', or 'auto'
-            }
+    Requests are assembled here (path-style URL with the bucket as the first path segment,
+    sub-resources and query parameters as sent) and signed with botocore's query-string
+    signer, so the signature always covers exactly what is sent, including Content-MD5,
+    Content-Type and x-amz-* headers. Signature version 2 is kept on purpose: the storages
+    this provider targets do not necessarily support signature version 4.
+    """
+
+    # query parameter names as used by the S3 REST API, keyed by the names callers pass
+    QUERY_PARAMETERS = {
+        'Prefix': 'prefix',
+        'Delimiter': 'delimiter',
+        'MaxKeys': 'max-keys',
+        'Marker': 'marker',
+        'KeyMarker': 'key-marker',
+        'VersionIdMarker': 'version-id-marker',
+        'VersionId': 'versionId',
+        'UploadId': 'uploadId',
+        'PartNumber': 'partNumber',
+        'EncodingType': 'encoding-type',
+        'ResponseContentDisposition': 'response-content-disposition',
+        'ResponseContentType': 'response-content-type',
+        'ResponseContentEncoding': 'response-content-encoding',
+        'ResponseContentLanguage': 'response-content-language',
+        'ResponseCacheControl': 'response-cache-control',
+        'ResponseExpires': 'response-expires',
+    }
+
+    # sub-resource that identifies each operation, when the operation has one
+    SUBRESOURCES = {
+        'list_object_versions': 'versions',
+        'create_multipart_upload': 'uploads',
+        'delete_objects': 'delete',
+    }
+
+    # operations whose listing responses are requested URL-encoded
+    URL_ENCODED_LISTINGS = ('list_objects', 'list_object_versions')
+
+    def __init__(self, aws_access_key_id=None, aws_secret_access_key=None, endpoint_url=None):
+        self.endpoint_url = endpoint_url.rstrip('/')
+        self.credentials = Credentials(aws_access_key_id, aws_secret_access_key)
+
+    @staticmethod
+    def copy_source_header(copy_source):
+        """The x-amz-copy-source header value for ``bucket/key``."""
+        return '/' + parse.quote(copy_source)
+
+    def generate_presigned_url(self, ClientMethod, Params=None, ExpiresIn=settings.TEMP_URL_SECS,
+                               HttpMethod=None, Headers=None):
+        """Return a signed URL for the operation ``ClientMethod``.
+
+        :param str ClientMethod: operation name (``list_objects``, ``put_object``, ...)
+        :param dict Params: ``Bucket``, optional ``Key`` and the operation's parameters
+        :param int ExpiresIn: lifetime of the signature in seconds
+        :param str HttpMethod: HTTP method the caller will use
+        :param dict Headers: request headers the caller will send that take part in the
+            signature (Content-MD5, Content-Type, x-amz-*); they must be sent unchanged
+        """
+        params = dict(Params or {})
+        bucket = params.pop('Bucket')
+        key = params.pop('Key', '')
+
+        headers = {}
+        if 'ServerSideEncryption' in params:
+            headers['x-amz-server-side-encryption'] = params.pop('ServerSideEncryption')
+        if 'CopySource' in params:
+            headers['x-amz-copy-source'] = self.copy_source_header(params.pop('CopySource'))
+        headers.update(Headers or {})
+
+        query = []
+        subresource = self.SUBRESOURCES.get(ClientMethod)
+        if subresource:
+            query.append((subresource, None))
+        for name, value in params.items():
+            if name not in self.QUERY_PARAMETERS:
+                raise ValueError('Unsupported parameter for {}: {}'.format(ClientMethod, name))
+            query.append((self.QUERY_PARAMETERS[name], str(value)))
+        if ClientMethod in self.URL_ENCODED_LISTINGS:
+            query.append(('encoding-type', 'url'))
+
+        # Sub-resources are signed without a value; the storage canonicalizes them the same
+        # way. They are sent as ``name=`` afterwards (see below).
+        query_string = '&'.join(
+            name if value is None else '{}={}'.format(name, parse.quote(value, safe=''))
+            for name, value in query
         )
+        url = '{}/{}/{}'.format(self.endpoint_url, bucket, parse.quote(key, safe='/'))
+        if query_string:
+            url += '?' + query_string
 
-        self.s3 = boto3.resource(
-            's3',
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-            region_name=region_name,
-            endpoint_url=endpoint_url,
-            config=config,
-            use_ssl=use_ssl,
-            verify=verify_ssl,
-        )
+        request = AWSRequest(method=HttpMethod, url=url, headers=headers)
+        HmacV1QueryAuth(self.credentials, expires=ExpiresIn).add_auth(request)
 
-    def generate_presigned_url(self, ClientMethod, Params=None, ExpiresIn=settings.TEMP_URL_SECS, HttpMethod=None):
-        return self.s3.meta.client.generate_presigned_url(ClientMethod, Params=Params, ExpiresIn=ExpiresIn, HttpMethod=HttpMethod)
+        # The signer copies x-amz-* headers into the query string; they are sent as headers,
+        # so drop the copies. Every query element is sent as ``name=value``: storages that
+        # verify query-string signatures strictly reject a bare sub-resource name.
+        scheme, netloc, path, _, signed_query, _ = parse.urlparse(request.url)
+        pairs = []
+        for element in signed_query.split('&'):
+            name = element.split('=', 1)[0]
+            if name.lower().startswith('x-amz-'):
+                continue
+            pairs.append(element if '=' in element else element + '=')
+        return parse.urlunparse((scheme, netloc, path, '', '&'.join(pairs), ''))
 
 
 class S3CompatProvider(provider.BaseProvider):
@@ -125,11 +200,7 @@ class S3CompatProvider(provider.BaseProvider):
             aws_access_key_id=credentials['access_key'],
             aws_secret_access_key=credentials['secret_key'],
             endpoint_url=endpoint_url,
-            region_name=self.region,
-            use_ssl=is_secure,
-            verify_ssl=is_secure
         )
-        self.bucket = self.connection.s3.Bucket(self.bucket_name)
 
     async def validate_v1_path(self, path, **kwargs):
         wbpath = WaterButlerPath(path, prepend=self.prefix)
@@ -207,7 +278,7 @@ class S3CompatProvider(provider.BaseProvider):
 
         # ensure no left slash when joining paths
         copy_source = os.path.join(self.settings['bucket'], source_path.full_path.lstrip('/'))
-        headers = {'x-amz-copy-source': '/' + parse.quote(copy_source)}
+        headers = {'x-amz-copy-source': S3CompatConnection.copy_source_header(copy_source)}
         query_parameters = {
             'Bucket': dest_provider.bucket_name,
             'Key': dest_path.full_path,
@@ -661,6 +732,7 @@ class S3CompatProvider(provider.BaseProvider):
                 Params=query_parameters,
                 ExpiresIn=200,
                 HttpMethod='POST',
+                Headers=headers,
             ),
             data=payload,
             headers=headers,
@@ -716,14 +788,7 @@ class S3CompatProvider(provider.BaseProvider):
                         delete_list = [
                             {'Key': path.full_path, 'VersionId': vid} for vid in batch
                         ]
-                        # Run synchronous boto3 call in executor to avoid blocking
-                        loop = asyncio.get_event_loop()
-                        response = await loop.run_in_executor(
-                            None,
-                            lambda d=delete_list: self.bucket.delete_objects(
-                                Delete={'Objects': d, 'Quiet': False}
-                            ),
-                        )
+                        response = await self._delete_objects(delete_list)
                         # Check for errors in response
                         if 'Errors' in response and response['Errors']:
                             error_count = len(response['Errors'])
@@ -779,6 +844,49 @@ class S3CompatProvider(provider.BaseProvider):
                 await resp.release()
         else:
             await self._delete_folder(path, **kwargs)
+
+    async def _delete_objects(self, objects):
+        """Delete up to 1000 objects (optionally specific versions) with one request.
+
+        :param list objects: ``{'Key': ..., 'VersionId': ...}`` dicts, ``VersionId`` optional
+        :rtype: dict with ``Deleted`` and ``Errors`` lists as returned by the storage
+        """
+        entries = []
+        for obj in objects:
+            entry = '<Key>{}</Key>'.format(xml.sax.saxutils.escape(obj['Key']))
+            if obj.get('VersionId'):
+                entry += '<VersionId>{}</VersionId>'.format(xml.sax.saxutils.escape(obj['VersionId']))
+            entries.append('<Object>{}</Object>'.format(entry))
+        payload = '<?xml version="1.0" encoding="UTF-8"?><Delete>{}</Delete>'.format(
+            ''.join(entries)
+        ).encode('utf-8')
+        headers = {
+            'Content-Length': str(len(payload)),
+            'Content-MD5': compute_md5(BytesIO(payload))[1],
+            'Content-Type': 'text/xml',
+        }
+        resp = await self.make_request(
+            'POST',
+            functools.partial(
+                self.connection.generate_presigned_url,
+                'delete_objects',
+                Params={'Bucket': self.bucket_name},
+                HttpMethod='POST',
+                Headers=headers,
+            ),
+            data=payload,
+            headers=headers,
+            expects=(HTTPStatus.OK,),
+            throws=exceptions.DeleteError,
+        )
+        contents = await resp.read()
+        await resp.release()
+        parsed = xmltodict.parse(contents.decode('utf-8'), strip_whitespace=False).get('DeleteResult') or {}
+        result = {}
+        for name in ('Deleted', 'Error'):
+            items = parsed.get(name, [])
+            result['Errors' if name == 'Error' else name] = [items] if isinstance(items, dict) else list(items)
+        return result
 
     async def _delete_folder_prefix(self, prefix):
         """Delete the folder prefix object (e.g. 'foldername/') from S3."""
@@ -902,13 +1010,7 @@ class S3CompatProvider(provider.BaseProvider):
             if all_objects:
                 for i in range(0, len(all_objects), 1000):
                     batch = all_objects[i:i + 1000]
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda d=batch: self.bucket.delete_objects(
-                            Delete={'Objects': d, 'Quiet': False}
-                        ),
-                    )
+                    response = await self._delete_objects(batch)
                     if response.get('Errors'):
                         error_count = len(response['Errors'])
                         error_codes = [e.get('Code', 'Unknown') for e in response['Errors']]
@@ -945,14 +1047,7 @@ class S3CompatProvider(provider.BaseProvider):
         # AWS allows max 1000 objects per delete_objects call
         for i in range(0, len(all_objects), 1000):
             batch = all_objects[i: i + 1000]
-            # Run synchronous boto3 call in executor to avoid blocking
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda b=batch: self.bucket.delete_objects(
-                    Delete={'Objects': b, 'Quiet': False}
-                ),
-            )
+            response = await self._delete_objects(batch)
             # Check for errors in response
             if 'Errors' in response and response['Errors']:
                 error_count = len(response['Errors'])
