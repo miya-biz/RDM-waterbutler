@@ -39,7 +39,7 @@ poetry run invoke server
 ```
 
 Poetry creates and manages a virtual environment for the project. To run commands inside it without
-the `poetry run` prefix, use `poetry shell` or activate the environment reported by `poetry env info`.
+the `poetry run` prefix, activate the environment with `poetry env activate`.
 
 Some tasks also require a running celery worker.  You will need to install `rabbitmq` and run a server:
 
